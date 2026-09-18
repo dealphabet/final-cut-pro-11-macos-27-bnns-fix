@@ -1,77 +1,89 @@
-# Logic Pro 11.2.2 on macOS 27 — BNNS Compatibility Patch
+# Final Cut Pro 11.1 on macOS 27 — BNNS Compatibility Patch (FCP port)
 
-Unofficial compatibility patch for a Logic Pro 11.2.2 / macOS 27 incompatibility in `MAMachineLearning.framework` and Apple's BNNS Graph API.
+Unofficial compatibility patch for Final Cut Pro 11.1 dying at launch on macOS 27 with:
 
-Logic Pro 11.2.2 expects an older BNNS Graph ABI. On the tested macOS 27 build, some legacy symbols are no longer exposed with the ABI Logic expects. The first visible failure was a pre-launch dyld error for `_BNNSGraphGetSize`.
+```text
+Termination Reason: Namespace DYLD, Code 4, Symbol missing
+Symbol not found: _BNNSGraphGetSize
+Referenced from: .../EDEL.framework/.../MAMachineLearning.framework/.../MAMachineLearning
+Expected in: .../Accelerate.framework
+```
 
-This patch does not replace BNNS or disable the affected ML features. It creates a separate Logic Pro copy and adds a compatibility adapter that translates Logic's older BNNS calls to the current BNNS Graph / GraphContext interface.
+Same macOS 27 BNNS Graph ABI transition that breaks Logic Pro 11.x. This port applies the same
+copy-only adapter strategy to FCP's nested `MAMachineLearning 11.1 (922)` (compatible with both
+standard and trial installations of Final Cut Pro 11.1).
+
+Upstream Logic fix this is ported from (attribution — see `ATTRIBUTION.md`):
+`https://github.com/NewtonPuff/logic-pro-11-macos-27-bnns-fix`
 
 ## Tested configuration
 
-- Logic Pro 11.2.2, build 6387
-- macOS 27.0, build 26A428
-- Apple Silicon / native ARM64
-- SIP enabled
+- Final Cut Pro 11.1 (440108), inner `MAMachineLearning 11.1 (922)`
+  - SHA-256: `c0e0729bf54f2313eb168126a3631d2c804176cc5c41493c17182bbd7d7457c7`
+- macOS 27.0 (26A428), Apple Silicon ARM64, SIP enabled
+- Launch-tested: patched copy stays alive past dyld (stock dies in <1s). ML runtime testing is
+  ongoing — please report Enhance Audio / masking results with the adapter log (below).
 
-Runtime-tested successfully with ChromaGlow, Mastering Assistant, Stem Splitter, pitch-related features, Pedalboard/model-based effects, normal playback and ML model processing.
+## What it does
 
-## What the patch does
-
-- Verifies the exact supported Logic Pro build before patching.
-- Copies `/Applications/Logic Pro.app`; the original is not modified.
-- Neutralizes the obsolete direct `BNNSGraphGetSize` serializer path and marks the legacy import weak.
-- Redirects Logic's private BNNS dynamic-loader path to a bundled compatibility adapter.
-- Builds the adapter locally with Apple's command-line tools.
-- Reconstructs current `bnns_graph_t` / compile-option objects for modern BNNS calls.
-- Maps legacy graph inputs/outputs to current BNNS argument positions.
-- Creates modern BNNS GraphContexts.
-- Executes models using tensor-aware GraphContext arguments so shape/stride metadata is preserved.
-- Ad-hoc signs only the modified copy and verifies the patched bytes afterward.
+- Verifies the exact FCP 11.1 build by version + SHA-256 before touching anything.
+- Auto-detects `/Applications/Final Cut Pro.app` or `/Applications/Final Cut Pro Trial.app`.
+- Copies the app bundle — the original is never modified.
+- Neutralizes the obsolete direct `BNNSGraphGetSize` call + serializer branch (both slices).
+- Sets `N_WEAK_REF` on the legacy import (belt-and-braces).
+- Redirects both internal BNNS `dlopen` strings to a bundled compatibility adapter.
+- Renames both import-pool strings `_BNNSGraphGetSize` → `_vDSP_vadd` (verified present in
+  macOS 27 Accelerate), so the strong dyld bind succeeds. The rebound GOT slot is never
+  called (direct call is NOP'd); the real `dlsym("BNNSGraphGetSize")` path resolves via adapter.
+- Builds the adapter locally (`FCPBNNSCompat.c`, universal arm64+x86_64) with Apple clang.
+- Ad-hoc signs only the copy (adapter → inner framework → EDEL.framework) and verifies bytes.
 
 ## What it does not do
 
-It does not modify `/System`, replace Accelerate.framework, disable SIP, alter the Signed System Volume, change Logic licensing/trial state, or overwrite the original Logic Pro app.
+No `/System` change, no Accelerate replacement, no SIP disable, no SSV change, no license/account
+change, no overwrite of the original app.
 
-## Install
+## Install (new users)
 
-1. Keep the original Logic Pro 11.2.2 at `/Applications/Logic Pro.app`.
-2. Download and extract `Logic11-BNNS-Patcher.zip`.
-3. Double-click `Logic11-BNNS-Patcher.command`.
-4. The default output is `~/Desktop/Logic Pro 11 BNNS Patched.app`.
-5. Launch the patched copy normally from Finder.
+1. Keep stock Final Cut Pro 11.1 in `/Applications`.
+2. Back up your libraries (e.g. `~/Movies/*.fcpbundle` + `Final Cut Backups.localized`) to external.
+   Always test on a DUPLICATE library first.
+3. Free disk: ensure you have enough free space for the duplicated app (`df -h /System/Volumes/Data`).
+4. Double-click `FCP-BNNS-Patcher.command`
+   (or `chmod +x FCP-BNNS-Patcher.command && ./FCP-BNNS-Patcher.command`).
+5. Output by default: `~/Desktop/Final Cut Pro 11 BNNS Patched.app`.
+6. Launch the patched copy via right-click → Open (first time, to clear Gatekeeper).
+7. Open a duplicate library first. Try ML features, then check `/tmp/FCPBNNSCompat.log`
+   for `succeeded` vs `ERROR rc=-1` + shadow-buffer counts.
 
-The patched app can stay on the Desktop or be moved to `/Applications` later. Do not overwrite your original Logic Pro app.
+Do NOT overwrite your original app. Do NOT move the patched copy over it.
 
 ## Requirements
 
-The patcher needs macOS command-line developer tools (`xcrun`, `clang`, `lipo`, `python3`) because `BNNSCompat.dylib` is built locally during installation.
+macOS command-line tools: `xcrun`, `clang`, `lipo`, `python3`. The adapter is compiled locally —
+no prebuilt binary blob.
 
 ## Safety checks
 
-The patcher checks the original `MAMachineLearning` SHA-256 before changing anything:
-
-```text
-b7a4e954e202a605af48dc10f963de075def2ecdf4d1c239a7e5022eb3f125da
-```
-
-If the binary does not match the tested Logic 11.2.2 build, the patcher stops instead of applying offsets blindly.
-
-## Scope and limitations
-
-End-to-end ML runtime testing was performed on Apple Silicon. The compatibility source and patch logic include the x86_64 slice, but real Intel runtime behavior is not yet independently verified.
-
-This patch is specific to the tested Logic Pro 11.2.2 build and the observed macOS 27 BNNS transition. Future Logic or macOS updates may change the ABI or make this patch unnecessary.
+- Version must read `11.1`, binary hash must equal the tested build above, or the script stops.
+- All 10 patch sites (call, branch ×2 slices, n_desc ×2, dlopen ×2, import rename ×2) are checked
+  byte-exact before AND after. Symtab copies of the old name are verified intact (proves the
+  rename hit the import pool, not debug strings).
+- `otool` confirms no direct `_BNNSGraphGetSize` stub call remains per arch.
 
 ## Diagnostics
 
-If a BNNS-related crash occurs, the adapter log is written to:
+Adapter log:
 
 ```text
-/tmp/LogicBNNSCompat.log
+/tmp/FCPBNNSCompat.log
 ```
 
-Please include the macOS version/build, Logic version/build, Mac architecture, feature being used, the `.ips` crash report, and the adapter log when reporting an issue.
+If an ML feature fails, include: macOS version/build, FCP version/build, Mac arch, feature used,
+newest `~/Library/Logs/DiagnosticReports/Final Cut Pro*.ips`, and the adapter log.
 
-## Disclaimer
+## Status / disclaimer
 
-This project is unofficial and is not affiliated with or supported by Apple Inc. Keep backups of important projects and keep your original Logic Pro installation intact.
+Experimental port, launch-verified, ML runtime validation ongoing. Same caveats as upstream:
+unofficial, not affiliated with Apple, keep originals + backups. For deadlines prefer the
+official current Final Cut via App Store / Creator Studio.
